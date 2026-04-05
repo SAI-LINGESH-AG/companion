@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>Chat — Soulmate</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<div class="loading-overlay" id="loadingOverlay">
+  <div class="spinner"></div>
+  <p>Connecting you…</p>
+</div>
+
+<div class="chat-layout" id="chatLayout" style="display:none">
+
+  <!-- Header -->
+  <div class="chat-header">
+    <div class="companion-avatar" id="compAvatar">💜</div>
+    <div class="companion-info">
+      <h3 id="compNameHeader">…</h3>
+      <span id="compStatus">Online</span>
+    </div>
+    <div class="header-actions">
+      <button class="icon-btn" title="Clear chat" onclick="clearChat()">🗑️</button>
+      <button class="icon-btn" title="Sign out" onclick="signOut()">🚪</button>
+    </div>
+  </div>
+
+  <!-- Messages -->
+  <div class="chat-messages" id="chatMessages"></div>
+
+  <!-- Input -->
+  <div class="chat-input-area">
+    <div class="input-row">
+      <textarea
+        id="msgInput"
+        placeholder="Type a message…"
+        rows="1"
+        maxlength="1000"
+        onkeydown="handleKey(event)"
+        oninput="autoGrow(this)"
+      ></textarea>
+      <button class="send-btn" id="sendBtn" onclick="sendMessage()" title="Send">
+        ➤
+      </button>
+    </div>
+  </div>
+
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+  import { getAuth, onAuthStateChanged, signOut as fbSignOut }
+    from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
+  import { getFirestore, doc, getDoc, collection, addDoc, query, orderBy, getDocs, deleteDoc }
+    from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+
+  const firebaseConfig = {
+    apiKey: "YOUR_API_KEY",
+    authDomain: "YOUR_PROJECT.firebaseapp.com",
+    projectId: "YOUR_PROJECT_ID",
+    storageBucket: "YOUR_PROJECT.appspot.com",
+    messagingSenderId: "YOUR_SENDER_ID",
+    appId: "YOUR_APP_ID"
+  };
+
+  // 🔧 Replace with your Hugging Face Space URL
+  const HF_API_URL = "https://YOUR-HF-SPACE.hf.space/chat";
+
+  const app = initializeApp(firebaseConfig);
+  const auth = getAuth(app);
+  const db = getFirestore(app);
+
+  let currentUser = null;
+  let companion = null;
+  let chatHistory = [];
+
+  const TYPE_ICONS = {
+    romantic: "💕", family: "👨‍👩‍👧", deceased: "🕊️", friend: "🤝"
+  };
+
+  // ── INIT ──
+  onAuthStateChanged(auth, async (user) => {
+    if (!user) { window.location.href = "index.html"; return; }
+    currentUser = user;
+
+    // Load companion
+    const snap = await getDoc(doc(db, "companions", user.uid));
+    if (!snap.exists()) { window.location.href = "setup.html"; return; }
+    companion = snap.data();
+
+    // Set header
+    document.getElementById("compNameHeader").textContent = companion.name;
+    document.getElementById("compAvatar").textContent = TYPE_ICONS[companion.type] || "💜";
+
+    // Load chat history from Firestore
+    await loadHistory();
+
+    document.getElementById("loadingOverlay").style.display = "none";
+    document.getElementById("chatLayout").style.display = "flex";
+    scrollToBottom();
+
+    // Greet if first time
+    if (chatHistory.length === 0) {
+      await sendAIGreeting();
+    }
+  });
+
+  async function loadHistory() {
+    const q = query(
+      collection(db, "chats", currentUser.uid, "messages"),
+      orderBy("ts")
+    );
+    const snap = await getDocs(q);
+    snap.forEach(d => {
+      const m = d.data();
+      chatHistory.push({ role: m.role, content: m.content });
+      renderMessage(m.role, m.content, m.ts);
+    });
+  }
+
+  async function sendAIGreeting() {
+    const greeting = await callAI("", true);
+    if (greeting) {
+      appendMessage("ai", greeting);
+      await saveMessage("assistant", greeting);
+    }
+  }
+
+  // ── SEND ──
+  window.sendMessage = async () => {
+    const input = document.getElementById("msgInput");
+    const text = input.value.trim();
+    if (!text) return;
+
+    input.value = "";
+    autoGrow(input);
+    setLoading(true);
+
+    appendMessage("user", text);
+    await saveMessage("user", text);
+    chatHistory.push({ role: "user", content: text });
+
+    showTyping();
+    const reply = await callAI(text);
+    hideTyping();
+
+    if (reply) {
+      appendMessage("ai", reply);
+      await saveMessage("assistant", reply);
+      chatHistory.push({ role: "assistant", content: reply });
+    }
+
+    setLoading(false);
+  };
+
+  async function callAI(message, isGreeting = false) {
+    try {
+      const payload = {
+        persona: {
+          name: companion.name,
+          type: companion.type,
+          description: companion.description,
+          user_name: companion.user_name
+        },
+        history: chatHistory.slice(-12),
+        message: isGreeting
+          ? `[Start the conversation naturally. Greet ${companion.user_name} warmly as ${companion.name}. Keep it short and real.]`
+          : message
+      };
+
+      const res = await fetch(HF_API_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+
+      if (!res.ok) throw new Error("API error");
+      const data = await res.json();
+      return data.reply;
+    } catch (e) {
+      showToast("Connection issue. Is the AI backend running?");
+      return null;
+    }
+  }
+
+  async function saveMessage(role, content) {
+    await addDoc(collection(db, "chats", currentUser.uid, "messages"), {
+      role,
+      content,
+      ts: Date.now()
+    });
+  }
+
+  // ── RENDER ──
+  function appendMessage(role, text, ts) {
+    renderMessage(role, text, ts || Date.now());
+    scrollToBottom();
+  }
+
+  function renderMessage(role, text, ts) {
+    const wrap = document.getElementById("chatMessages");
+    const isUser = role === "user";
+
+    const row = document.createElement("div");
+    row.className = `msg-row ${isUser ? "user" : "ai"}`;
+
+    const avatar = document.createElement("div");
+    avatar.className = "msg-avatar";
+    avatar.textContent = isUser ? "🧑" : (TYPE_ICONS[companion?.type] || "💜");
+
+    const col = document.createElement("div");
+
+    const bubble = document.createElement("div");
+    bubble.className = "msg-bubble";
+    bubble.textContent = text;
+
+    const time = document.createElement("div");
+    time.className = "msg-time";
+    time.textContent = formatTime(ts);
+
+    col.appendChild(bubble);
+    col.appendChild(time);
+
+    row.appendChild(avatar);
+    row.appendChild(col);
+    wrap.appendChild(row);
+  }
+
+  let typingEl = null;
+  function showTyping() {
+    const wrap = document.getElementById("chatMessages");
+    const row = document.createElement("div");
+    row.className = "msg-row ai";
+    row.id = "typingRow";
+
+    const avatar = document.createElement("div");
+    avatar.className = "msg-avatar";
+    avatar.textContent = TYPE_ICONS[companion?.type] || "💜";
+
+    const ind = document.createElement("div");
+    ind.className = "typing-indicator";
+    ind.innerHTML = `<div class="typing-dot"></div><div class="typing-dot"></div><div class="typing-dot"></div>`;
+
+    row.appendChild(avatar);
+    row.appendChild(ind);
+    wrap.appendChild(row);
+    typingEl = row;
+    scrollToBottom();
+  }
+
+  function hideTyping() {
+    if (typingEl) { typingEl.remove(); typingEl = null; }
+  }
+
+  // ── HELPERS ──
+  function scrollToBottom() {
+    const el = document.getElementById("chatMessages");
+    el.scrollTop = el.scrollHeight;
+  }
+
+  function formatTime(ts) {
+    return new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  }
+
+  function setLoading(on) {
+    document.getElementById("sendBtn").disabled = on;
+    document.getElementById("msgInput").disabled = on;
+  }
+
+  window.autoGrow = (el) => {
+    el.style.height = "auto";
+    el.style.height = Math.min(el.scrollHeight, 120) + "px";
+  };
+
+  window.handleKey = (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage();
+    }
+  };
+
+  window.clearChat = async () => {
+    if (!confirm("Clear all chat history with " + companion.name + "?")) return;
+    const q = query(collection(db, "chats", currentUser.uid, "messages"), orderBy("ts"));
+    const snap = await getDocs(q);
+    const dels = snap.docs.map(d => deleteDoc(d.ref));
+    await Promise.all(dels);
+    chatHistory = [];
+    document.getElementById("chatMessages").innerHTML = "";
+    showToast("Chat cleared.");
+    await sendAIGreeting();
+  };
+
+  window.signOut = async () => {
+    await fbSignOut(auth);
+    window.location.href = "index.html";
+  };
+
+  window.showToast = (msg) => {
+    const t = document.getElementById("toast");
+    t.textContent = msg;
+    t.classList.add("show");
+    setTimeout(() => t.classList.remove("show"), 3000);
+  };
+</script>
+</body>
+</html>
