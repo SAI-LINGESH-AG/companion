@@ -652,11 +652,11 @@
 
     <div class="form-group">
       <label>Companion's Name</label>
-      <input type="text" id="companion-name" placeholder="Companion's Name" maxlength="20"/>
+      <input type="text" id="companion-name" placeholder="e.g. Aria, Luna, Alex..." maxlength="20"/>
     </div>
 
     <div class="form-group">
-      <label>Your Interests</label>
+      <label>Your Interests (optional)</label>
       <input type="text" id="user-interests" placeholder="music, movies, travel, coding..." maxlength="100"/>
     </div>
 
@@ -730,11 +730,20 @@
 
 <script>
 // ============================================================
-// CONFIG
+// CONFIG - hardcoded fallback (always works even if keys.json fails to load)
 // ============================================================
 const GITHUB_OWNER = 'SAI-LINGESH-AG';
 const GITHUB_REPO = 'companion';
-const GITHUB_TOKEN_KEY = 'github_token';
+const GITHUB_PAT = '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';
+
+// ⬇️ Hardcoded keys - app always works with these even if keys.json fails
+const HARDCODED_GROQ_KEYS = [
+  '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',
+  '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',
+  // Add more keys below when you have them:
+  // 'gsk_YOUR_KEY_3_HERE',
+  // 'gsk_YOUR_KEY_4_HERE',
+];
 
 // ============================================================
 // STATE
@@ -752,27 +761,51 @@ let todayKey = new Date().toISOString().split('T')[0];
 // INIT
 // ============================================================
 async function init() {
-  try {
-    config = await loadJSON('keys.json');
-    profile = await loadJSON('data/profile.json');
-    const memData = await loadJSON('data/memory.json');
-    memory = memData.memories || [];
-  } catch(e) {
-    // First run - use defaults
-    config = { groq_keys: [], github: {} };
-    profile = getDefaultProfile();
-    memory = [];
-  }
+  // Step 1: Always use hardcoded keys immediately - no waiting, no failures
+  config = {
+    groq_keys: [...HARDCODED_GROQ_KEYS],
+    github: { token: GITHUB_PAT, owner: GITHUB_OWNER, repo: GITHUB_REPO }
+  };
+  profile = getDefaultProfile();
+  memory = [];
 
   renderAPIStatus();
 
-  // Check if profile is set up
+  // Step 2: Check localStorage for profile (instant)
   const saved = localStorage.getItem('companion_profile');
   if (saved) {
     profile = JSON.parse(saved);
     hideSetup();
     updateHeader();
     loadTodayChat();
+  }
+
+  // Step 3: Load memory from localStorage (instant)
+  const savedMem = localStorage.getItem('companion_memory');
+  if (savedMem) { try { memory = JSON.parse(savedMem); } catch(e) {} }
+
+  // Step 4: Sync from GitHub in background (non-blocking, optional enhancement)
+  loadFromGitHubInBackground();
+}
+
+async function loadFromGitHubInBackground() {
+  try {
+    // Try to load extra keys from keys.json on GitHub
+    const remoteConfig = await loadJSON('keys.json');
+    if (remoteConfig && remoteConfig.groq_keys) {
+      // Merge: hardcoded + any new keys from GitHub
+      const allKeys = [...new Set([...HARDCODED_GROQ_KEYS, ...remoteConfig.groq_keys.filter(k => k && !k.startsWith('PLACEHOLDER'))])];
+      config.groq_keys = allKeys;
+      renderAPIStatus();
+    }
+    // Load memory from GitHub
+    const memData = await loadJSON('data/memory.json');
+    if (memData && memData.memories && memData.memories.length > memory.length) {
+      memory = memData.memories;
+      localStorage.setItem('companion_memory', JSON.stringify(memory));
+    }
+  } catch(e) {
+    // GitHub sync failed silently - app still works with hardcoded keys
   }
 }
 
@@ -865,11 +898,10 @@ function capitalizeFirst(str) {
 // GITHUB API
 // ============================================================
 async function loadJSON(path) {
-  const token = config?.github?.token || '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';
   const url = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/${path}`;
   const res = await fetch(url, {
     headers: {
-      'Authorization': `token ${token}`,
+      'Authorization': `token ${GITHUB_PAT}`,
       'Accept': 'application/vnd.github.v3+json'
     }
   });
@@ -879,25 +911,24 @@ async function loadJSON(path) {
 }
 
 async function saveJSON(path, content) {
-  const token = config?.github?.token || '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';
   const url = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/${path}`;
 
   // Get existing SHA
   let sha = null;
   try {
     const res = await fetch(url, {
-      headers: { 'Authorization': `token ${token}`, 'Accept': 'application/vnd.github.v3+json' }
+      headers: { 'Authorization': `token ${GITHUB_PAT}`, 'Accept': 'application/vnd.github.v3+json' }
     });
     if (res.ok) { const d = await res.json(); sha = d.sha; }
   } catch(e) {}
 
-  const body = { message: `Update ${path}`, content: btoa(JSON.stringify(content, null, 2)) };
+  const body = { message: `Update ${path}`, content: btoa(unescape(encodeURIComponent(JSON.stringify(content, null, 2)))) };
   if (sha) body.sha = sha;
 
   await fetch(url, {
     method: 'PUT',
     headers: {
-      'Authorization': `token ${token}`,
+      'Authorization': `token ${GITHUB_PAT}`,
       'Content-Type': 'application/json',
       'Accept': 'application/vnd.github.v3+json'
     },
@@ -961,8 +992,9 @@ function renderSavedMessages() {
 // GROQ API - ROUND ROBIN
 // ============================================================
 function getActiveKeys() {
-  if (!config || !config.groq_keys) return [];
-  return config.groq_keys.filter(k => k && !k.startsWith('PLACEHOLDER') && !exhaustedKeys.has(k));
+  // Always use hardcoded keys as the source of truth
+  const allKeys = config?.groq_keys?.length ? config.groq_keys : HARDCODED_GROQ_KEYS;
+  return allKeys.filter(k => k && !k.startsWith('PLACEHOLDER') && !exhaustedKeys.has(k));
 }
 
 function getNextKey() {
