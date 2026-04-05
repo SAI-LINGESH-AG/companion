@@ -1,9 +1,7 @@
 {
   "groq_keys": [
     "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",
-    "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",
-    "PLACEHOLDER_GROQ_KEY_3",
-    "PLACEHOLDER_GROQ_KEY_4"
+    "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"
   ],
   "github": {
     "token": "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",
